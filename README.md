@@ -2,7 +2,7 @@
 
 An async Python webhook service that turns Telegram group updates into autonomous project management actions on Notion, with strict chat-level tenant isolation.
 
-## What it does??
+## What it does?
 
 - Processes only messages where your bot is tagged (e.g. `@yourbot`)
 - Enforces strict routing: Telegram `chat_id` -> one authorized Notion database
