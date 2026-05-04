@@ -65,3 +65,6 @@ wa_sidecar/node_modules/
 # Logs and local tooling
 *.log
 ngrok.yml
+
+
+/auth_state/
