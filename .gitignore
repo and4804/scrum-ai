@@ -68,3 +68,4 @@ ngrok.yml
 
 
 /auth_state/
+/wa_sidecar/auth_state/
