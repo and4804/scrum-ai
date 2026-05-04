@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+httpx
+openai
+pydantic-settings
+python-dotenv
+pytz
+tzdata
+apscheduler>=3.10.0
+rapidfuzz>=3.6.0
