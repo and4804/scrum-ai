@@ -1,18 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from config import get_settings
+from time_utils import get_timezone
 
 
 def build_system_prompt() -> str:
     settings = get_settings()
-    try:
-        timezone = ZoneInfo(settings.app_timezone)
-    except ZoneInfoNotFoundError:
-        # Windows may miss IANA data if tzdata is not installed in venv.
-        timezone = ZoneInfo("UTC")
+    timezone = get_timezone(settings.app_timezone)
 
     now = datetime.now(timezone)
     now_iso = now.isoformat()
@@ -32,10 +28,10 @@ Rules:
    - Reassignment: `get_team_workload` -> `suggest_reassignment` -> `reassign_task`
    - Standup requests: `generate_standup_report` directly
 3) For completion/progress statements, call `update_status` where appropriate.
-4) For new task requests, call `create_task`. If fields are missing, backend fills defaults.
+4) For new task requests, call `create_task` only after getting explicit confirmation. If fields are missing, backend fills defaults.
 5) For list/show requests, call `list_tasks` and summarize clearly.
 6) If `get_task_details` or `search_tasks` returns multiple matches/clarification needed, ask a follow-up question and DO NOT guess.
-7) Use Telegram MarkdownV2 formatting in replies.
+7) Use WhatsApp-friendly plain text: short lines, simple bullets ("-"), minimal punctuation; avoid headings, numbered lists, and code blocks.
 8) Keep replies under 280 words unless returning a standup report.
 9) End any write-action response with: "✅ Done. Want me to log a comment on this task?"
 10) For read-only responses, end with one concise status line.

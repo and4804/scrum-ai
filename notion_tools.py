@@ -6,6 +6,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+from rapidfuzz import fuzz
 
 from config import get_settings
 
@@ -76,6 +77,27 @@ class NotionTools:
                 "reason": "multiple_fuzzy_matches",
                 "matches": [task.get("task_name") for task in fuzzy],
             }
+
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for task in tasks:
+            name = (task.get("task_name") or "").strip()
+            if not name:
+                continue
+            score = int(fuzz.token_set_ratio(target, name.lower()))
+            scored.append((score, task))
+        if scored:
+            scored.sort(key=lambda item: item[0], reverse=True)
+            best_score = scored[0][0]
+            if best_score >= 85:
+                close = [t for s, t in scored if s >= best_score - 2]
+                if len(close) == 1:
+                    return {"ok": True, "task": close[0]}
+                return {
+                    "ok": False,
+                    "needs_clarification": True,
+                    "reason": "multiple_fuzzy_matches",
+                    "matches": [task.get("task_name") for task in close],
+                }
         return {"ok": False, "error": f"Task '{task_name}' not found"}
 
     async def search_tasks(
@@ -405,22 +427,30 @@ class NotionTools:
         return {"ok": True, "project_name": project_name, "projects": grouped}
 
     async def update_deadline(self, task_name: str, new_deadline: str, db_id: str) -> dict[str, Any]:
-        page_id = await self._find_task_page_id(task_name, db_id)
+        task = await self.get_task_details(db_id, task_name)
+        if not task.get("ok"):
+            return task
+        existing = task["task"]
+        page_id = existing.get("page_id")
         if not page_id:
-            return {"ok": False, "error": f"Task '{task_name}' not found"}
+            return {"ok": False, "error": "task_page_id_missing"}
 
         payload = {"properties": {"Deadline": {"date": {"start": new_deadline}}}}
         await self._patch_page(page_id, payload)
-        return {"ok": True, "task_name": task_name, "new_deadline": new_deadline}
+        return {"ok": True, "task_name": existing.get("task_name"), "new_deadline": new_deadline}
 
     async def update_status(self, task_name: str, new_status: str, db_id: str) -> dict[str, Any]:
-        page_id = await self._find_task_page_id(task_name, db_id)
+        task = await self.get_task_details(db_id, task_name)
+        if not task.get("ok"):
+            return task
+        existing = task["task"]
+        page_id = existing.get("page_id")
         if not page_id:
-            return {"ok": False, "error": f"Task '{task_name}' not found"}
+            return {"ok": False, "error": "task_page_id_missing"}
 
         payload = {"properties": {"Status": {"status": {"name": new_status}}}}
         await self._patch_page(page_id, payload)
-        return {"ok": True, "task_name": task_name, "new_status": new_status}
+        return {"ok": True, "task_name": existing.get("task_name"), "new_status": new_status}
 
     async def create_task(
         self,
@@ -436,6 +466,7 @@ class NotionTools:
         comments: str | None = None,
     ) -> dict[str, Any]:
         defaults = await self._get_creation_defaults(db_id)
+        props = defaults["properties"]
         resolved_assigned_to = assigned_to or defaults["assigned_to"]
         resolved_deadline = deadline or defaults["deadline"]
         resolved_priority = priority or defaults["priority"]
@@ -444,6 +475,12 @@ class NotionTools:
         resolved_client_name = client_name or defaults["client_name"]
         resolved_client_info = client_info or ""
         resolved_comments = comments or ""
+
+        resolved_assigned_to = self._resolve_option(props, "Assigned To", resolved_assigned_to)
+        resolved_priority = self._resolve_option(props, "Priority", resolved_priority)
+        resolved_status = self._resolve_option(props, "Status", resolved_status)
+        resolved_project = self._resolve_option(props, "Project", resolved_project)
+        resolved_client_name = self._resolve_option(props, "Client Name", resolved_client_name)
 
         payload = {
             "parent": {"database_id": db_id},
@@ -786,7 +823,7 @@ class NotionTools:
             return False
         return start <= due <= end
 
-    async def _get_creation_defaults(self, db_id: str) -> dict[str, str]:
+    async def _get_creation_defaults(self, db_id: str) -> dict[str, Any]:
         schema = await self.get_database_schema(db_id)
         props = schema.get("properties", {})
         tasks_info = await self.debug_list_tasks(db_id, page_size=100)
@@ -795,6 +832,7 @@ class NotionTools:
         today = datetime.now(ZoneInfo(self._timezone)).date()
 
         return {
+            "properties": props,
             "project": self._first_option_name(props, "Project", fallback="General"),
             "client_name": self._first_option_name(props, "Client Name", fallback="Client"),
             "assigned_to": (
@@ -813,6 +851,29 @@ class NotionTools:
             ),
             "deadline": (today + timedelta(days=1)).isoformat(),
         }
+
+    def _resolve_option(self, properties: dict[str, Any], property_name: str, value: str) -> str:
+        if not value:
+            return value
+        options = self._extract_property_options(properties, property_name)
+        if not options:
+            return value
+        target_norm = self._normalize_option_value(value)
+        norm_map = {self._normalize_option_value(opt): opt for opt in options if opt}
+        if target_norm in norm_map:
+            return norm_map[target_norm]
+        best: tuple[int, str | None] = (0, None)
+        for opt in options:
+            score = int(fuzz.token_set_ratio(value.lower(), opt.lower()))
+            if score > best[0]:
+                best = (score, opt)
+        if best[0] >= 90 and best[1]:
+            return best[1]
+        return value
+
+    @staticmethod
+    def _normalize_option_value(value: str) -> str:
+        return "".join(ch for ch in value.lower().strip() if ch.isalnum())
 
     def _first_option_name(self, properties: dict[str, Any], property_name: str, fallback: str) -> str:
         options = self._extract_property_options(properties, property_name)

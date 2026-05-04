@@ -5,13 +5,13 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from openai import AsyncOpenAI
 
 from config import get_settings
 from context import build_system_prompt
 from notion_tools import NotionTools
+from time_utils import now_in_tz, today_in_tz
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -282,6 +282,8 @@ class ProjectManagerAgent:
         self._client = AsyncOpenAI(api_key=settings.openai_api_key)
         self._notion = NotionTools()
         self._pending_actions: dict[str, dict[str, Any]] = {}
+        self._chat_history: dict[str, list[dict[str, str]]] = {}
+        self._history_max = 8
 
     async def run(self, user_message: str, notion_db_id: str, sender_name: str, chat_id: str) -> str:
         logger.info(
@@ -296,6 +298,7 @@ class ProjectManagerAgent:
             user_message=user_message,
         )
         if pending_result:
+            self._remember_turn(chat_id, user_message, pending_result)
             return pending_result
 
         proactive_warning = await self._build_proactive_alert_block(notion_db_id)
@@ -318,6 +321,7 @@ class ProjectManagerAgent:
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
+            *self._chat_history.get(chat_id, []),
             {
                 "role": "user",
                 "content": (
@@ -370,10 +374,14 @@ class ProjectManagerAgent:
                 continue
 
             logger.info("agent_final_response content=%s", assistant_message.content)
-            return assistant_message.content or "I could not generate a response."
+            final_response = assistant_message.content or "I could not generate a response."
+            self._remember_turn(chat_id, user_message, final_response)
+            return final_response
 
         logger.warning("agent_tool_limit_reached")
-        return "I hit the tool-call limit for this request. Please try again with a shorter update."
+        final_response = "I hit the tool-call limit for this request. Please try again with a shorter update."
+        self._remember_turn(chat_id, user_message, final_response)
+        return final_response
 
     async def _dispatch_tool_call(
         self,
@@ -605,22 +613,31 @@ class ProjectManagerAgent:
             explicit_deadline = enforcement_state.get("explicit_deadline")
             deadline = args.get("deadline") or explicit_deadline
             assigned_to = args.get("assigned_to") or enforcement_state.get("sender_name")
-
-            try:
-                return await self._notion.create_task(
-                    task_name=task_name,
-                    db_id=notion_db_id,
-                    assigned_to=assigned_to,
-                    deadline=deadline,
-                    priority=args.get("priority"),
-                    status=args.get("status"),
-                    project=args.get("project"),
-                    client_name=args.get("client_name"),
-                    client_info=args.get("client_info"),
-                    comments=args.get("comments"),
-                )
-            except Exception as exc:
-                return {"ok": False, "error": "notion_create_task_failed", "detail": str(exc)}
+            action_args = {
+                "task_name": task_name,
+                "assigned_to": assigned_to,
+                "deadline": deadline,
+                "priority": args.get("priority"),
+                "status": args.get("status"),
+                "project": args.get("project"),
+                "client_name": args.get("client_name"),
+                "client_info": args.get("client_info"),
+                "comments": args.get("comments"),
+            }
+            preview = ", ".join(
+                f"{key.replace('_', ' ')}={value}"
+                for key, value in action_args.items()
+                if value
+            )
+            return self._queue_confirmation(
+                enforcement_state=enforcement_state,
+                tool_name="create_task",
+                action_args=action_args,
+                message=(
+                    "Please confirm: create task with "
+                    f"{preview or 'the provided details'}? Reply with yes/confirm/ok to proceed."
+                ),
+            )
         if tool_name == "list_tasks":
             requested_assigned_to = args.get("assigned_to")
             include_completed = args.get("include_completed", True)
@@ -654,7 +671,7 @@ class ProjectManagerAgent:
 
     def _extract_explicit_deadline(self, user_message: str) -> str | None:
         text = user_message.lower()
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
         year = today.year
 
         if "day after tomorrow" in text:
@@ -734,28 +751,33 @@ class ProjectManagerAgent:
             "december": 12,
         }
 
-        # Matches "9th May" / "9 May"
-        day_month_match = re.search(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{month_pattern}\b", text)
-        # Matches "May 9th" / "May 9"
-        month_day_match = re.search(rf"\b{month_pattern}\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", text)
+        day_month_matches = list(
+            re.finditer(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+{month_pattern}\b", text)
+        )
+        month_day_matches = list(
+            re.finditer(rf"\b{month_pattern}\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", text)
+        )
 
-        try:
-            if day_month_match:
-                day = int(day_month_match.group(1))
-                month = month_map[day_month_match.group(2)]
+        candidates: list[tuple[int, int, int]] = []
+        for match in day_month_matches:
+            day = int(match.group(1))
+            month = month_map[match.group(2)]
+            candidates.append((match.start(), day, month))
+        for match in month_day_matches:
+            month = month_map[match.group(1)]
+            day = int(match.group(2))
+            candidates.append((match.start(), day, month))
+
+        if candidates:
+            # Prefer the last-mentioned date when multiple dates appear in a request.
+            _, day, month = sorted(candidates, key=lambda c: c[0])[-1]
+            try:
                 candidate = datetime(year=year, month=month, day=day)
                 if candidate.date() < today:
                     candidate = candidate.replace(year=year + 1)
                 return candidate.date().isoformat()
-            if month_day_match:
-                month = month_map[month_day_match.group(1)]
-                day = int(month_day_match.group(2))
-                candidate = datetime(year=year, month=month, day=day)
-                if candidate.date() < today:
-                    candidate = candidate.replace(year=year + 1)
-                return candidate.date().isoformat()
-        except ValueError:
-            return None
+            except ValueError:
+                return None
 
         return None
 
@@ -798,7 +820,7 @@ class ProjectManagerAgent:
         self._pending_actions[chat_id] = {
             "tool_name": tool_name,
             "args": action_args,
-            "expires_at": datetime.now(ZoneInfo(self._timezone)) + timedelta(minutes=10),
+            "expires_at": now_in_tz(self._timezone) + timedelta(minutes=10),
         }
         return {"ok": False, "confirmation_required": True, "message": message}
 
@@ -812,7 +834,7 @@ class ProjectManagerAgent:
         if not pending:
             return None
         expires_at = pending.get("expires_at")
-        if isinstance(expires_at, datetime) and datetime.now(ZoneInfo(self._timezone)) > expires_at:
+        if isinstance(expires_at, datetime) and now_in_tz(self._timezone) > expires_at:
             self._pending_actions.pop(chat_id, None)
             return "Pending action expired. Please request the change again."
 
@@ -830,6 +852,13 @@ class ProjectManagerAgent:
 
         self._pending_actions.pop(chat_id, None)
         return "Action cancelled."
+
+    def _remember_turn(self, chat_id: str, user_message: str, assistant_message: str) -> None:
+        history = self._chat_history.setdefault(chat_id, [])
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": assistant_message})
+        if len(history) > self._history_max:
+            self._chat_history[chat_id] = history[-self._history_max :]
 
     async def _execute_pending_action(
         self,
@@ -854,5 +883,18 @@ class ProjectManagerAgent:
                 db_id=db_id,
                 task_names=args.get("task_names", []),
                 new_status=args.get("new_status", ""),
+            )
+        if tool_name == "create_task":
+            return await self._notion.create_task(
+                task_name=args.get("task_name", ""),
+                db_id=db_id,
+                assigned_to=args.get("assigned_to"),
+                deadline=args.get("deadline"),
+                priority=args.get("priority"),
+                status=args.get("status"),
+                project=args.get("project"),
+                client_name=args.get("client_name"),
+                client_info=args.get("client_info"),
+                comments=args.get("comments"),
             )
         return {"ok": False, "error": f"unknown_pending_tool:{tool_name}"}

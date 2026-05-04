@@ -6,7 +6,7 @@ import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+from time_utils import get_timezone, now_in_tz, today_in_tz
 
 from openai import AsyncOpenAI
 from rapidfuzz import fuzz
@@ -27,7 +27,7 @@ EVENING_SKIP_DATE: dict[str, str] = {}
 
 telegram = TelegramClient()
 notion = NotionTools()
-TZ = ZoneInfo(get_settings().app_timezone)
+TZ = get_timezone(get_settings().app_timezone)
 
 PROACTIVE_PATTERN = ("done", "completed", "finished", "blocked")
 
@@ -62,7 +62,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _set_expect_session(chat_id: int | str) -> None:
-    today = datetime.now(TZ).date().isoformat()
+    today = today_in_tz(get_settings().app_timezone).isoformat()
     _write_json(_expect_file(chat_id), {"date": today})
 
 
@@ -76,19 +76,19 @@ def _clear_expect_session(chat_id: int | str) -> None:
 
 
 def _expect_session_active(chat_id: int | str) -> bool:
-    today = datetime.now(TZ).date().isoformat()
+    today = today_in_tz(get_settings().app_timezone).isoformat()
     data = _read_json(_expect_file(chat_id))
     return bool(data and data.get("date") == today)
 
 
 def _summary_done_today(chat_id: int | str) -> bool:
-    today = datetime.now(TZ).date().isoformat()
+    today = today_in_tz(get_settings().app_timezone).isoformat()
     data = _read_json(_done_file(chat_id))
     return bool(data and data.get("date") == today)
 
 
 def _mark_summary_done(chat_id: int | str) -> None:
-    today = datetime.now(TZ).date().isoformat()
+    today = today_in_tz(get_settings().app_timezone).isoformat()
     _write_json(_done_file(chat_id), {"date": today})
 
 
@@ -108,8 +108,8 @@ def _mdv2(text: str) -> str:
     return escape_markdown_v2(text)
 
 
-async def _send_md(chat_id: int | str, text: str) -> None:
-    await telegram.send_message(chat_id, text, parse_mode="MarkdownV2")
+async def _send_plain(chat_id: int | str, text: str) -> None:
+    await telegram.send_message(chat_id, text, parse_mode=None)
 
 
 def _combine_tasks(
@@ -181,7 +181,7 @@ def _mention_for(chat_id: int | str, notion_name: str) -> str:
     handle = get_telegram_handle(chat_id, notion_name)
     if handle:
         return f"@{handle}"
-    return _mdv2(notion_name)
+    return notion_name
 
 
 def _format_morning_message(
@@ -189,11 +189,11 @@ def _format_morning_message(
     today_full: list[dict[str, Any]],
     overdue_full: list[dict[str, Any]],
 ) -> str:
-    today_d = datetime.now(TZ).date()
+    today_d = today_in_tz(get_settings().app_timezone)
     lines: list[str] = [
-        "*📋 Good morning\\! Here's today's task board\\.*",
+        "Good morning. Today's task board:",
         "",
-        "*Due Today:*",
+        "Due today:",
     ]
     unassigned_today = [t for t in today_full if not (t.get("assignee") or "").strip()]
     assigned_today = [t for t in today_full if (t.get("assignee") or "").strip()]
@@ -201,49 +201,38 @@ def _format_morning_message(
         key=lambda t: ((t.get("assignee") or "").lower(), (t.get("task_name") or "").lower())
     )
     if not assigned_today and not unassigned_today:
-        lines.append(_mdv2("— None —"))
+        lines.append("- None")
     else:
         for t in assigned_today:
-            pr = (t.get("priority") or "—").strip()
+            pr = (t.get("priority") or "-").strip()
             lines.append(
-                f"• {_mdv2(t.get('task_name') or '')} → {_mention_for(chat_id, t['assignee'])} "
-                f"| Priority: {_mdv2(pr)}"
+                f"- {t.get('task_name') or ''} | { _mention_for(chat_id, t['assignee']) } | Priority: {pr}"
             )
         for t in unassigned_today:
-            pr = (t.get("priority") or "—").strip()
-            lines.append(
-                f"• {_mdv2(t.get('task_name') or '')} → Unassigned | Priority: {_mdv2(pr)}"
-            )
+            pr = (t.get("priority") or "-").strip()
+            lines.append(f"- {t.get('task_name') or ''} | Unassigned | Priority: {pr}")
 
-    lines.extend(["", "*Still Overdue \\(action needed\\):*"])
+    lines.extend(["", "Overdue (action needed):"])
     unassigned_od = [t for t in overdue_full if not (t.get("assignee") or "").strip()]
     assigned_od = [t for t in overdue_full if (t.get("assignee") or "").strip()]
     assigned_od.sort(
         key=lambda t: ((t.get("assignee") or "").lower(), (t.get("task_name") or "").lower())
     )
     if not assigned_od and not unassigned_od:
-        lines.append(_mdv2("— None —"))
+        lines.append("- None")
     else:
         for t in assigned_od:
             late = _days_late(t.get("deadline"), today_d)
             late_s = f"{late} days late" if late is not None else "late"
             lines.append(
-                f"• {_mdv2(t.get('task_name') or '')} → {_mention_for(chat_id, t['assignee'])} "
-                f"| {_mdv2(late_s)}"
+                f"- {t.get('task_name') or ''} | { _mention_for(chat_id, t['assignee']) } | {late_s}"
             )
         for t in unassigned_od:
             late = _days_late(t.get("deadline"), today_d)
             late_s = f"{late} days late" if late is not None else "late"
-            lines.append(
-                f"• {_mdv2(t.get('task_name') or '')} → Unassigned | {_mdv2(late_s)}"
-            )
+            lines.append(f"- {t.get('task_name') or ''} | Unassigned | {late_s}")
 
-    lines.extend(
-        [
-            "",
-            "*🕙 I'll check in with everyone at 10 PM for updates\\.*",
-        ]
-    )
+    lines.extend(["", "I will check in with everyone at 10 PM for updates."])
     return "\n".join(lines)
 
 
@@ -263,14 +252,14 @@ async def morning_briefing(chat_id: int | str, db_id: str) -> None:
     today_full, overdue_full = _combine_tasks(today_tasks, overdue_tasks)
 
     if not today_full and not overdue_full:
-        EVENING_SKIP_DATE[ck] = datetime.now(TZ).date().isoformat()
-        text = "*✅ No deadlines today\\. Clean slate — stay ahead\\!*"
-        await _send_md(chat_id, text)
+        EVENING_SKIP_DATE[ck] = today_in_tz(get_settings().app_timezone).isoformat()
+        text = "No deadlines today. Clean slate - stay ahead."
+        await _send_plain(chat_id, text)
         return
 
     EVENING_SKIP_DATE.pop(ck, None)
     msg = _format_morning_message(chat_id, today_full, overdue_full)
-    await _send_md(chat_id, msg)
+    await _send_plain(chat_id, msg)
 
 
 def _looks_proactive_checkin(text: str) -> bool:
@@ -391,7 +380,7 @@ async def evening_checkin_start(chat_id: int | str, db_id: str) -> None:
     if _skip_weekends(chat_id) and _is_weekend_today():
         return
     ck = _chat_key(chat_id)
-    if EVENING_SKIP_DATE.get(ck) == datetime.now(TZ).date().isoformat():
+    if EVENING_SKIP_DATE.get(ck) == today_in_tz(get_settings().app_timezone).isoformat():
         return
 
     dpath = _done_file(chat_id)
@@ -421,7 +410,7 @@ async def evening_checkin_start(chat_id: int | str, db_id: str) -> None:
     if not assignees and not early:
         return
 
-    now = datetime.now(TZ)
+    now = now_in_tz(get_settings().app_timezone)
     CHECKIN_STATE[ck] = {
         "pending": assignees,
         "responses": dict(early),
@@ -437,26 +426,26 @@ async def evening_checkin_start(chat_id: int | str, db_id: str) -> None:
     pending_sorted = sorted(assignees, key=lambda s: s.lower())
     pending_mentions = " ".join(_mention_for(chat_id, n) for n in pending_sorted) if pending_sorted else ""
 
-    header_lines = ["*🕙 Evening check\\-in time\\!*", ""]
+    header_lines = ["Evening check-in time.", ""]
     if pending_mentions:
         header_lines.append(f"Pending updates from: {pending_mentions}")
     elif early:
-        header_lines.append("Everyone already shared an update earlier today — thanks\\!")
+        header_lines.append("Everyone already shared an update earlier today - thanks.")
     header_lines.extend(
         [
             "",
-            "*Reply with a quick update on your tasks for today\\.*",
-            "*Format \\(optional\\): Done: X \\| In Progress: Y \\| Blocked: Z*",
+            "Reply with a quick update on your tasks for today.",
+            "Format (optional): Done: X | In Progress: Y | Blocked: Z",
         ]
     )
-    await _send_md(chat_id, "\n".join(header_lines))
+    await _send_plain(chat_id, "\n".join(header_lines))
 
     for person in pending_sorted:
         theirs = buckets.get(person, [])
         names = [t.get("task_name") for t in theirs[:3] if t.get("task_name")]
         task_part = ", ".join(_mdv2(n) for n in names) if names else _mdv2("your tasks")
-        line = f"{_mention_for(chat_id, person)} — what's your status on {task_part}?"
-        await _send_md(chat_id, line)
+        line = f"{_mention_for(chat_id, person)} - what's your status on {task_part}?"
+        await _send_plain(chat_id, line)
 
     EARLY_CHECKIN_RESPONSES.pop(ck, None)
 
@@ -473,7 +462,7 @@ async def evening_checkin_summarize(chat_id: int | str) -> None:
             try:
                 await _send_md(
                     chat_id,
-                    "⚠️ Check\\-in state was lost due to restart\\. Please update tasks manually\\.",
+                    "Check-in state was lost due to restart. Please update tasks manually.",
                 )
             except Exception:
                 logger.exception("evening_summarize_empty_state_send_failed chat=%s", ck)
@@ -490,7 +479,7 @@ async def evening_checkin_summarize(chat_id: int | str) -> None:
     db_id = state["db_id"]
     pending: set[str] = set(state.get("pending") or [])
     responses: dict[str, str] = dict(state.get("responses") or {})
-    today_iso = datetime.now(TZ).date().isoformat()
+    today_iso = today_in_tz(get_settings().app_timezone).isoformat()
 
     try:
         today = await notion.get_today_tasks(db_id)
@@ -530,9 +519,9 @@ async def evening_checkin_summarize(chat_id: int | str) -> None:
         "You are a project manager summarizing an end-of-day team check-in. "
         "Be concise, constructive, flag blockers, suggest next steps.\n"
         "Return ONLY valid JSON with keys: "
-        "summary_markdown (MarkdownV2 body without outer title line), "
-        "member_lines (array of {assignee, line_md}), "
-        "action_items (array of strings, MarkdownV2), "
+        "summary_text (plain text body without outer title line), "
+        "member_lines (array of {assignee, line_text}), "
+        "action_items (array of strings, plain text), "
         "health_emoji (one of GREEN,YELLOW,RED), "
         "health_label (short), "
         "notion_actions (array of objects: "
@@ -554,7 +543,7 @@ async def evening_checkin_summarize(chat_id: int | str) -> None:
     except Exception:
         logger.exception("evening_summary_llm_failed chat=%s", ck)
         parsed = {
-            "summary_markdown": "_Could not generate an LLM summary; raw responses are logged internally\\._",
+            "summary_text": "Could not generate an LLM summary; raw responses are logged internally.",
             "member_lines": [],
             "action_items": [],
             "health_emoji": "YELLOW",
@@ -566,22 +555,24 @@ async def evening_checkin_summarize(chat_id: int | str) -> None:
     health_map = {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}
     health_icon = health_map.get(str(health).upper(), "🟡")
 
-    title = f"*📊 End\\-of\\-Day Summary — {today_iso}*"
-    body = str(parsed.get("summary_markdown") or "").strip()
+    title = f"End-of-day summary - {today_iso}"
+    body = str(parsed.get("summary_text") or "").strip()
     member_lines = parsed.get("member_lines") or []
-    ml_joined = "\n".join(str(x.get("line_md", "")) for x in member_lines if x.get("line_md"))
+    ml_joined = "\n".join(
+        str(x.get("line_text", "")) for x in member_lines if x.get("line_text")
+    )
 
     actions = parsed.get("action_items") or []
     if actions:
-        ai = "*Action items for tomorrow:*\n" + "\n".join(f"• {a}" for a in actions)
+        ai = "Action items for tomorrow:\n" + "\n".join(f"- {a}" for a in actions)
     else:
         ai = ""
 
-    health_line = f"*Overall team health: {health_icon} {_mdv2(str(parsed.get('health_label') or 'Moderate'))}*"
+    health_line = f"Overall team health: {health_icon} {str(parsed.get('health_label') or 'Moderate')}"
 
     if pending:
         names = " ".join(_mention_for(chat_id, n) for n in sorted(pending, key=lambda s: s.lower()))
-        nr = f"*⚠️ No response from: {names} — tasks unverified\\.*"
+        nr = f"No response from: {names} - tasks unverified."
     else:
         nr = ""
 
@@ -623,11 +614,11 @@ async def evening_checkin_summarize(chat_id: int | str) -> None:
                 logger.info("nonresponder_comment_failed task=%s", tn)
 
     if auto_log:
-        footer = "\n\n_" + _mdv2(f"Auto-updated {len(auto_log)} tasks in Notion based on check-in responses.") + "_"
+        footer = f"\n\nAuto-updated {len(auto_log)} tasks in Notion based on check-in responses."
         summary_text += footer
 
     try:
-        await _send_md(chat_id, summary_text)
+        await _send_plain(chat_id, summary_text)
     except Exception:
         logger.exception("evening_summary_send_failed chat=%s", ck)
 
