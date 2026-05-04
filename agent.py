@@ -55,7 +55,18 @@ TOOLS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "task_name": {"type": "string"},
-                    "assigned_to": {"type": "string"},
+                    "assigned_to": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ]
+                    },
+                    "people_involved": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {"type": "array", "items": {"type": "string"}},
+                        ]
+                    },
                     "deadline": {"type": "string"},
                     "priority": {"type": "string"},
                     "status": {"type": "string"},
@@ -393,7 +404,7 @@ class ProjectManagerAgent:
         args = json.loads(raw_arguments or "{}")
 
         if tool_name == "get_workload":
-            assigned_to = args.get("assigned_to") or enforcement_state.get("sender_name")
+            assigned_to = args.get("assigned_to")
             if not assigned_to:
                 return {"ok": False, "error": "missing_required_argument:assigned_to"}
 
@@ -616,6 +627,7 @@ class ProjectManagerAgent:
             action_args = {
                 "task_name": task_name,
                 "assigned_to": assigned_to,
+                "people_involved": args.get("people_involved"),
                 "deadline": deadline,
                 "priority": args.get("priority"),
                 "status": args.get("status"),
@@ -889,6 +901,7 @@ class ProjectManagerAgent:
                 task_name=args.get("task_name", ""),
                 db_id=db_id,
                 assigned_to=args.get("assigned_to"),
+                people_involved=args.get("people_involved"),
                 deadline=args.get("deadline"),
                 priority=args.get("priority"),
                 status=args.get("status"),

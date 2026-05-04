@@ -112,6 +112,17 @@ async def _send_plain(chat_id: int | str, text: str) -> None:
     await telegram.send_message(chat_id, text, parse_mode=None)
 
 
+def _normalize_assignees(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, tuple):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str):
+        raw = value.strip()
+        return [raw] if raw else []
+    return []
+
+
 def _combine_tasks(
     today_tasks: list[dict[str, Any]], overdue_tasks: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -121,7 +132,7 @@ def _combine_tasks(
         today_full.append(
             {
                 "task_name": t.get("task_name"),
-                "assignee": t.get("assignee") or t.get("assigned_to"),
+                "assignees": _normalize_assignees(t.get("assignee") or t.get("assigned_to")),
                 "priority": t.get("priority"),
                 "project": t.get("project"),
                 "deadline": t.get("deadline"),
@@ -133,7 +144,7 @@ def _combine_tasks(
         overdue_full.append(
             {
                 "task_name": t.get("task_name"),
-                "assignee": t.get("assigned_to") or t.get("assignee"),
+                "assignees": _normalize_assignees(t.get("assigned_to") or t.get("assignee")),
                 "priority": t.get("priority"),
                 "project": t.get("project"),
                 "deadline": t.get("deadline"),
@@ -148,10 +159,11 @@ def _tasks_by_assignee(
 ) -> dict[str, list[dict[str, Any]]]:
     buckets: dict[str, list[dict[str, Any]]] = {}
     for task in today_full + overdue_full:
-        a = (task.get("assignee") or "").strip()
-        if not a:
-            continue
-        buckets.setdefault(a, []).append(task)
+        assignees = task.get("assignees") or []
+        for assignee in assignees:
+            if not assignee:
+                continue
+            buckets.setdefault(assignee, []).append(task)
     return buckets
 
 
@@ -195,28 +207,35 @@ def _format_morning_message(
         "",
         "Due today:",
     ]
-    unassigned_today = [t for t in today_full if not (t.get("assignee") or "").strip()]
-    assigned_today = [t for t in today_full if (t.get("assignee") or "").strip()]
+    unassigned_today = [t for t in today_full if not t.get("assignees")]
+    assigned_today = [t for t in today_full if t.get("assignees")]
     assigned_today.sort(
-        key=lambda t: ((t.get("assignee") or "").lower(), (t.get("task_name") or "").lower())
+        key=lambda t: (
+            (t.get("assignees") or [""])[0].lower(),
+            (t.get("task_name") or "").lower(),
+        )
     )
     if not assigned_today and not unassigned_today:
         lines.append("- None")
     else:
         for t in assigned_today:
             pr = (t.get("priority") or "-").strip()
+            mentions = ", ".join(_mention_for(chat_id, a) for a in t.get("assignees") or [])
             lines.append(
-                f"- {t.get('task_name') or ''} | { _mention_for(chat_id, t['assignee']) } | Priority: {pr}"
+                f"- {t.get('task_name') or ''} | {mentions} | Priority: {pr}"
             )
         for t in unassigned_today:
             pr = (t.get("priority") or "-").strip()
             lines.append(f"- {t.get('task_name') or ''} | Unassigned | Priority: {pr}")
 
     lines.extend(["", "Overdue (action needed):"])
-    unassigned_od = [t for t in overdue_full if not (t.get("assignee") or "").strip()]
-    assigned_od = [t for t in overdue_full if (t.get("assignee") or "").strip()]
+    unassigned_od = [t for t in overdue_full if not t.get("assignees")]
+    assigned_od = [t for t in overdue_full if t.get("assignees")]
     assigned_od.sort(
-        key=lambda t: ((t.get("assignee") or "").lower(), (t.get("task_name") or "").lower())
+        key=lambda t: (
+            (t.get("assignees") or [""])[0].lower(),
+            (t.get("task_name") or "").lower(),
+        )
     )
     if not assigned_od and not unassigned_od:
         lines.append("- None")
@@ -224,8 +243,9 @@ def _format_morning_message(
         for t in assigned_od:
             late = _days_late(t.get("deadline"), today_d)
             late_s = f"{late} days late" if late is not None else "late"
+            mentions = ", ".join(_mention_for(chat_id, a) for a in t.get("assignees") or [])
             lines.append(
-                f"- {t.get('task_name') or ''} | { _mention_for(chat_id, t['assignee']) } | {late_s}"
+                f"- {t.get('task_name') or ''} | {mentions} | {late_s}"
             )
         for t in unassigned_od:
             late = _days_late(t.get("deadline"), today_d)

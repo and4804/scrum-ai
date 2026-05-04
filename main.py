@@ -218,11 +218,8 @@ async def debug_notion_tasks(chat_id: str, assignee: str | None = None) -> JSONR
     try:
         raw = await notion.debug_list_tasks(notion_db_id)
         if assignee:
-            normalized = notion._normalize_identity(assignee)
             filtered = [
-                task
-                for task in raw["tasks"]
-                if notion._normalize_identity(task.get("assigned_to") or "") == normalized
+                task for task in raw["tasks"] if notion._assignee_matches(task, assignee)
             ]
         else:
             filtered = raw["tasks"]

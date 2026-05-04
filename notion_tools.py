@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import logging
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
 from rapidfuzz import fuzz
 
 from config import get_settings
+from time_utils import now_in_tz, today_in_tz
 
 logger = logging.getLogger("scrum_ai.notion")
 
@@ -35,7 +35,12 @@ class NotionTools:
         data = await self._query_database(db_id, payload)
         tasks = [self._to_task_summary(page) for page in data.get("results", [])]
         available_assignees = sorted(
-            {task.get("assigned_to") for task in tasks if (task.get("assigned_to") or "").strip()}
+            {
+                assignee
+                for task in tasks
+                for assignee in self._coerce_people_list(task.get("assigned_to"))
+                if assignee
+            }
         )
         tasks = [
             task
@@ -109,13 +114,19 @@ class NotionTools:
         filters = filters or {}
         tasks = await self._fetch_all_tasks(db_id)
         q = query.strip().lower()
-        matched = [
-            task
-            for task in tasks
-            if q in (task.get("task_name") or "").lower()
-            or q in (task.get("project") or "").lower()
-            or q in (task.get("client_name") or "").lower()
-        ]
+        matched = []
+        for task in tasks:
+            if (
+                q in (task.get("task_name") or "").lower()
+                or q in (task.get("project") or "").lower()
+                or q in (task.get("client_name") or "").lower()
+            ):
+                matched.append(task)
+                continue
+            assignees = " ".join(self._coerce_people_list(task.get("assigned_to"))).lower()
+            people = " ".join(self._coerce_people_list(task.get("people_involved"))).lower()
+            if q and (q in assignees or q in people):
+                matched.append(task)
         matched = self._apply_task_filters(matched, filters)
         return {
             "ok": True,
@@ -129,29 +140,34 @@ class NotionTools:
         tasks = await self._fetch_all_tasks(db_id)
         workloads: dict[str, dict[str, Any]] = {}
         for task in tasks:
-            assignee = task.get("assigned_to") or "Unassigned"
-            bucket = workloads.setdefault(
-                assignee,
-                {
-                    "yet_to_start": 0,
-                    "in_progress": 0,
-                    "completed": 0,
-                    "nearest_deadline": None,
-                },
-            )
-            status = (task.get("status") or "").strip().lower()
-            if status == "yet to start":
-                bucket["yet_to_start"] += 1
-            elif status == "in progress":
-                bucket["in_progress"] += 1
-            elif status == "completed":
-                bucket["completed"] += 1
+            assignees = self._coerce_people_list(task.get("assigned_to"))
+            if not assignees:
+                assignees = ["Unassigned"]
 
+            status = (task.get("status") or "").strip().lower()
             deadline = task.get("deadline")
-            if deadline and status != "completed":
-                current = bucket["nearest_deadline"]
-                if current is None or deadline < current:
-                    bucket["nearest_deadline"] = deadline
+
+            for assignee in assignees:
+                bucket = workloads.setdefault(
+                    assignee,
+                    {
+                        "yet_to_start": 0,
+                        "in_progress": 0,
+                        "completed": 0,
+                        "nearest_deadline": None,
+                    },
+                )
+                if status == "yet to start":
+                    bucket["yet_to_start"] += 1
+                elif status == "in progress":
+                    bucket["in_progress"] += 1
+                elif status == "completed":
+                    bucket["completed"] += 1
+
+                if deadline and status != "completed":
+                    current = bucket["nearest_deadline"]
+                    if current is None or deadline < current:
+                        bucket["nearest_deadline"] = deadline
 
         return {"ok": True, "team_workload": workloads}
 
@@ -163,7 +179,7 @@ class NotionTools:
         page_id = existing.get("page_id")
         if not page_id:
             return {"ok": False, "error": "task_page_id_missing"}
-        payload = {"properties": {"Assigned To": {"select": {"name": new_assignee}}}}
+        payload = {"properties": {"Assigned To": {"multi_select": [{"name": new_assignee}]}}}
         await self._patch_page(page_id, payload)
         return {
             "ok": True,
@@ -197,7 +213,7 @@ class NotionTools:
         if not page_id:
             return {"ok": False, "error": "task_page_id_missing"}
 
-        timestamp = datetime.now(ZoneInfo(self._timezone)).strftime("%Y-%m-%d %H:%M IST")
+        timestamp = now_in_tz(self._timezone).strftime("%Y-%m-%d %H:%M IST")
         current_comments = existing.get("comments") or ""
         new_comment_block = f"[{timestamp}] {comment_text}"
         merged = new_comment_block if not current_comments else f"{new_comment_block}\n---\n{current_comments}"
@@ -211,7 +227,7 @@ class NotionTools:
         return {"ok": True, "task_name": existing.get("task_name"), "comment_added": new_comment_block}
 
     async def get_today_tasks(self, db_id: str) -> dict[str, Any]:
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
         today_iso = today.isoformat()
         tasks = await self._fetch_all_tasks(db_id)
         filtered: list[dict[str, Any]] = []
@@ -223,10 +239,11 @@ class NotionTools:
                 filtered.append(task)
 
         def assignee_sort_key(task: dict[str, Any]) -> tuple[str, str]:
-            assignee = task.get("assigned_to") or ""
+            assignees = self._coerce_people_list(task.get("assigned_to"))
+            assignee_label = assignees[0] if assignees else ""
             name = task.get("task_name") or ""
-            group = "1" if assignee else "0"
-            return (group, assignee.lower(), name.lower())
+            group = "1" if assignees else "0"
+            return (group, assignee_label.lower(), name.lower())
 
         filtered.sort(key=assignee_sort_key)
         return {
@@ -245,7 +262,7 @@ class NotionTools:
         }
 
     async def get_overdue_tasks(self, db_id: str, assignee: str | None = None) -> dict[str, Any]:
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
         tasks = await self._fetch_all_tasks(db_id)
         filtered: list[dict[str, Any]] = []
         for task in tasks:
@@ -265,7 +282,7 @@ class NotionTools:
         days: int = 3,
         assignee: str | None = None,
     ) -> dict[str, Any]:
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
         end = today + timedelta(days=max(days, 0))
         tasks = await self._fetch_all_tasks(db_id)
         filtered: list[dict[str, Any]] = []
@@ -300,7 +317,7 @@ class NotionTools:
         if assignee:
             tasks = [task for task in tasks if self._assignee_matches(task, assignee)]
 
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
         week_ago = today - timedelta(days=7)
 
         completed = [
@@ -345,7 +362,7 @@ class NotionTools:
 
     async def detect_blockers(self, db_id: str) -> dict[str, Any]:
         tasks = await self._fetch_all_tasks(db_id)
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
         blockers: list[dict[str, Any]] = []
         for task in tasks:
             status = (task.get("status") or "").strip().lower()
@@ -374,14 +391,18 @@ class NotionTools:
         if not task_res.get("ok"):
             return task_res
         task = task_res["task"]
-        current = task.get("assigned_to")
+        current_list = self._coerce_people_list(task.get("assigned_to"))
 
         workload_res = await self.get_team_workload(db_id)
         workload = workload_res.get("team_workload", {})
         candidates: list[tuple[str, int]] = []
         for assignee, data in workload.items():
-            if current and self._normalize_identity(assignee) == self._normalize_identity(current):
-                continue
+            if current_list:
+                if any(
+                    self._normalize_identity(assignee) == self._normalize_identity(current)
+                    for current in current_list
+                ):
+                    continue
             score = int(data.get("in_progress", 0)) + int(data.get("yet_to_start", 0))
             candidates.append((assignee, score))
         candidates.sort(key=lambda x: x[1])
@@ -394,7 +415,12 @@ class NotionTools:
             }
             for assignee, score in candidates[:2]
         ]
-        return {"ok": True, "task_name": task.get("task_name"), "current_assignee": current, "recommendations": top}
+        return {
+            "ok": True,
+            "task_name": task.get("task_name"),
+            "current_assignee": current_list,
+            "recommendations": top,
+        }
 
     async def get_project_summary(self, db_id: str, project_name: str | None = None) -> dict[str, Any]:
         tasks = await self._fetch_all_tasks(db_id)
@@ -456,7 +482,8 @@ class NotionTools:
         self,
         task_name: str,
         db_id: str,
-        assigned_to: str | None = None,
+        assigned_to: Any = None,
+        people_involved: Any = None,
         deadline: str | None = None,
         priority: str | None = None,
         status: str | None = None,
@@ -476,11 +503,20 @@ class NotionTools:
         resolved_client_info = client_info or ""
         resolved_comments = comments or ""
 
-        resolved_assigned_to = self._resolve_option(props, "Assigned To", resolved_assigned_to)
+        assigned_values = self._resolve_option_list(props, "Assigned To", resolved_assigned_to)
+        if not assigned_values:
+            assigned_values = self._resolve_option_list(props, "Assigned To", defaults["assigned_to"])
+        people_values = self._resolve_option_list(props, "People Involved", people_involved)
+
         resolved_priority = self._resolve_option(props, "Priority", resolved_priority)
         resolved_status = self._resolve_option(props, "Status", resolved_status)
         resolved_project = self._resolve_option(props, "Project", resolved_project)
         resolved_client_name = self._resolve_option(props, "Client Name", resolved_client_name)
+
+        assigned_payload = self._build_people_property(props, "Assigned To", assigned_values)
+        if not assigned_payload:
+            assigned_payload = {"multi_select": []}
+        people_payload = self._build_people_property(props, "People Involved", people_values)
 
         payload = {
             "parent": {"database_id": db_id},
@@ -492,12 +528,14 @@ class NotionTools:
                     "rich_text": [{"type": "text", "text": {"content": resolved_client_info}}]
                 },
                 "Deadline": {"date": {"start": resolved_deadline}},
-                "Assigned To": {"select": {"name": resolved_assigned_to}},
+                "Assigned To": assigned_payload,
                 "Priority": {"select": {"name": resolved_priority}},
                 "Status": {"status": {"name": resolved_status}},
                 "Comments": {"rich_text": [{"type": "text", "text": {"content": resolved_comments}}]},
             },
         }
+        if people_payload:
+            payload["properties"]["People Involved"] = people_payload
 
         created = await self._create_page(payload)
         return {
@@ -509,7 +547,8 @@ class NotionTools:
                 "client_name": resolved_client_name,
                 "client_info": resolved_client_info,
                 "deadline": resolved_deadline,
-                "assigned_to": resolved_assigned_to,
+                "assigned_to": assigned_values,
+                "people_involved": people_values,
                 "priority": resolved_priority,
                 "status": resolved_status,
                 "comments": resolved_comments,
@@ -609,6 +648,12 @@ class NotionTools:
                     for opt in value.get("status", {}).get("options", [])
                     if isinstance(opt, dict) and opt.get("name")
                 ]
+            elif prop_type == "multi_select":
+                entry["options"] = [
+                    opt.get("name")
+                    for opt in value.get("multi_select", {}).get("options", [])
+                    if isinstance(opt, dict) and opt.get("name")
+                ]
             schema[name] = entry
         return {
             "database_id": data.get("id", db_id),
@@ -624,7 +669,12 @@ class NotionTools:
         data = await self._query_database(db_id, {"page_size": page_size})
         tasks = [self._to_task_summary(page) for page in data.get("results", [])]
         unique_assignees = sorted(
-            {task.get("assigned_to") for task in tasks if (task.get("assigned_to") or "").strip()}
+            {
+                assignee
+                for task in tasks
+                for assignee in self._coerce_people_list(task.get("assigned_to"))
+                if assignee
+            }
         )
         return {
             "total_tasks": len(tasks),
@@ -680,9 +730,24 @@ class NotionTools:
         status = NotionTools._as_dict(
             NotionTools._as_dict(properties.get("Status")).get("status")
         )
-        assigned_to = NotionTools._as_dict(
-            NotionTools._as_dict(properties.get("Assigned To")).get("select")
-        )
+        assigned_prop = NotionTools._as_dict(properties.get("Assigned To"))
+        if assigned_prop.get("type") == "multi_select" or assigned_prop.get("multi_select") is not None:
+            assigned_to = [
+                opt.get("name")
+                for opt in assigned_prop.get("multi_select", [])
+                if isinstance(opt, dict) and opt.get("name")
+            ]
+        else:
+            assigned_to = NotionTools._as_dict(assigned_prop.get("select")).get("name")
+        people_prop = NotionTools._as_dict(properties.get("People Involved"))
+        if people_prop.get("type") == "multi_select" or people_prop.get("multi_select") is not None:
+            people_involved = [
+                opt.get("name")
+                for opt in people_prop.get("multi_select", [])
+                if isinstance(opt, dict) and opt.get("name")
+            ]
+        else:
+            people_involved = []
         project = NotionTools._as_dict(NotionTools._as_dict(properties.get("Project")).get("select"))
         client_name = NotionTools._as_dict(
             NotionTools._as_dict(properties.get("Client Name")).get("select")
@@ -696,12 +761,13 @@ class NotionTools:
             "deadline": deadline.get("start"),
             "priority": priority.get("name"),
             "status": status.get("name"),
-            "assigned_to": assigned_to.get("name"),
+            "assigned_to": assigned_to,
             "project": project.get("name"),
             "client_name": client_name.get("name"),
             "client_info": "".join(
                 item.get("plain_text", "") for item in client_info_items if isinstance(item, dict)
             ),
+            "people_involved": people_involved,
             "comments": "".join(
                 item.get("plain_text", "") for item in comments_items if isinstance(item, dict)
             ),
@@ -710,9 +776,16 @@ class NotionTools:
 
     @staticmethod
     def _assignee_matches(task: dict[str, Any], assigned_to: str) -> bool:
-        task_assignee = NotionTools._normalize_identity(task.get("assigned_to") or "")
+        task_assignees = NotionTools._coerce_people_list(task.get("assigned_to"))
+        if not task_assignees:
+            return False
         requested_assignee = NotionTools._normalize_identity(assigned_to)
-        return bool(task_assignee and requested_assignee and task_assignee == requested_assignee)
+        if not requested_assignee:
+            return False
+        return any(
+            NotionTools._normalize_identity(assignee) == requested_assignee
+            for assignee in task_assignees
+        )
 
     @staticmethod
     def _is_completed(task: dict[str, Any]) -> bool:
@@ -720,7 +793,7 @@ class NotionTools:
 
     @staticmethod
     def _normalize_identity(raw_value: str) -> str:
-        normalized = raw_value.strip().lower()
+        normalized = (raw_value or "").strip().lower()
         # Treat @name and name as equivalent for Telegram/Notion matching.
         if normalized.startswith("@"):
             normalized = normalized[1:]
@@ -731,11 +804,27 @@ class NotionTools:
         return normalized
 
     @staticmethod
+    def _coerce_people_list(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, tuple):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            if "," in raw:
+                parts = [p.strip() for p in raw.split(",")]
+                return [p for p in parts if p]
+            return [raw]
+        return []
+
+    @staticmethod
     def _as_dict(value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
 
     def _recommend_low_capacity_date(self, tasks: list[dict[str, Any]]) -> dict[str, Any]:
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
         start_date = today + timedelta(days=1)
         window_days = 14
         end_date = start_date + timedelta(days=window_days - 1)
@@ -788,6 +877,7 @@ class NotionTools:
         return {
             "task_name": task.get("task_name"),
             "assigned_to": task.get("assigned_to"),
+            "people_involved": task.get("people_involved"),
             "deadline": task.get("deadline"),
             "status": task.get("status"),
             "priority": task.get("priority"),
@@ -831,14 +921,21 @@ class NotionTools:
 
         today = datetime.now(ZoneInfo(self._timezone)).date()
 
+        assignee_options = self._extract_property_options(props, "Assigned To")
+        unassigned = None
+        for opt in assignee_options:
+            if opt.strip().lower() == "unassigned":
+                unassigned = opt
+                break
+
         return {
             "properties": props,
             "project": self._first_option_name(props, "Project", fallback="General"),
             "client_name": self._first_option_name(props, "Client Name", fallback="Client"),
             "assigned_to": (
-                unique_assignees[0]
-                if unique_assignees
-                else self._first_option_name(props, "Assigned To", fallback="Unassigned")
+                unassigned
+                if unassigned
+                else (unique_assignees[0] if unique_assignees else self._first_option_name(props, "Assigned To", fallback="Unassigned"))
             ),
             "priority": self._first_matching_option(
                 props, "Priority", preferred=["Medium", "High", "Low"], fallback="Medium"
@@ -875,6 +972,39 @@ class NotionTools:
     def _normalize_option_value(value: str) -> str:
         return "".join(ch for ch in value.lower().strip() if ch.isalnum())
 
+    def _resolve_option_list(
+        self,
+        properties: dict[str, Any],
+        property_name: str,
+        values: Any,
+    ) -> list[str]:
+        items = self._coerce_people_list(values)
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for value in items:
+            hit = self._resolve_option(properties, property_name, value)
+            norm = self._normalize_option_value(hit)
+            if norm and norm not in seen:
+                resolved.append(hit)
+                seen.add(norm)
+        return resolved
+
+    def _build_people_property(
+        self,
+        properties: dict[str, Any],
+        property_name: str,
+        values: list[str],
+    ) -> dict[str, Any] | None:
+        if not values:
+            return None
+        if property_name not in properties:
+            return None
+        prop = properties.get(property_name, {})
+        prop_type = prop.get("type") if isinstance(prop, dict) else None
+        if prop_type == "multi_select" or len(values) > 1:
+            return {"multi_select": [{"name": v} for v in values]}
+        return {"select": {"name": values[0]}}
+
     def _first_option_name(self, properties: dict[str, Any], property_name: str, fallback: str) -> str:
         options = self._extract_property_options(properties, property_name)
         return options[0] if options else fallback
@@ -908,5 +1038,8 @@ class NotionTools:
             return [opt.get("name") for opt in options if isinstance(opt, dict) and opt.get("name")]
         if prop_type == "status":
             options = prop.get("status", {}).get("options", [])
+            return [opt.get("name") for opt in options if isinstance(opt, dict) and opt.get("name")]
+        if prop_type == "multi_select":
+            options = prop.get("multi_select", {}).get("options", [])
             return [opt.get("name") for opt in options if isinstance(opt, dict) and opt.get("name")]
         return []
