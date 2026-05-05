@@ -24,36 +24,51 @@ def build_scheduler() -> AsyncIOScheduler:
     for chat_id_str, db_id in CHAT_DB_MAP.items():
         chat_id = chat_id_str
         job_suffix = "".join(c if c.isalnum() or c in "-_" else "_" for c in chat_id_str)
-        sched.add_job(
-            morning_briefing,
-            "cron",
-            hour=9,
-            minute=0,
-            args=[chat_id, db_id],
-            id=f"morning_{job_suffix}",
-            replace_existing=True,
-        )
-        logger.info("scheduler_job_registered id=%s time=09:00 IST chat=%s", f"morning_{job_suffix}", chat_id)
-        sched.add_job(
-            evening_checkin_start,
-            "cron",
-            hour=22,
-            minute=0,
-            args=[chat_id, db_id],
-            id=f"checkin_start_{job_suffix}",
-            replace_existing=True,
-        )
-        logger.info("scheduler_job_registered id=%s time=22:00 IST chat=%s", f"checkin_start_{job_suffix}", chat_id)
-        sched.add_job(
-            evening_checkin_summarize,
-            "cron",
-            hour=22,
-            minute=30,
-            args=[chat_id],
-            id=f"checkin_summary_{job_suffix}",
-            replace_existing=True,
-        )
-        logger.info("scheduler_job_registered id=%s time=22:30 IST chat=%s", f"checkin_summary_{job_suffix}", chat_id)
+        # Disabled for testing: morning task board update at 09:00 IST.
+        # sched.add_job(
+        #     morning_briefing,
+        #     "cron",
+        #     hour=9,
+        #     minute=0,
+        #     args=[chat_id, db_id],
+        #     id=f"morning_{job_suffix}",
+        #     replace_existing=True,
+        # )
+        # logger.info(
+        #     "scheduler_job_registered id=%s time=09:00 IST chat=%s",
+        #     f"morning_{job_suffix}",
+        #     chat_id,
+        # )
+        # Disabled for testing: evening task updates at 22:00 IST.
+        # sched.add_job(
+        #     evening_checkin_start,
+        #     "cron",
+        #     hour=22,
+        #     minute=0,
+        #     args=[chat_id, db_id],
+        #     id=f"checkin_start_{job_suffix}",
+        #     replace_existing=True,
+        # )
+        # logger.info(
+        #     "scheduler_job_registered id=%s time=22:00 IST chat=%s",
+        #     f"checkin_start_{job_suffix}",
+        #     chat_id,
+        # )
+        # Disabled for testing: today's tasking summary at 22:30 IST.
+        # sched.add_job(
+        #     evening_checkin_summarize,
+        #     "cron",
+        #     hour=22,
+        #     minute=30,
+        #     args=[chat_id],
+        #     id=f"checkin_summary_{job_suffix}",
+        #     replace_existing=True,
+        # )
+        # logger.info(
+        #     "scheduler_job_registered id=%s time=22:30 IST chat=%s",
+        #     f"checkin_summary_{job_suffix}",
+        #     chat_id,
+        # )
     _scheduler = sched
     return sched
 
