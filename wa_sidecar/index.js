@@ -38,6 +38,17 @@ let connectionOpen = false;
 let lastQr = null;
 let waConnectionState = "disconnected";
 
+// ── Message store (last 200 messages per group) ──────────────────────────────
+const MESSAGE_STORE_LIMIT = 200;
+const messageStore = new Map(); // jid → [{...}, ...]
+
+function storeMessage(jid, msg) {
+  if (!messageStore.has(jid)) messageStore.set(jid, []);
+  const arr = messageStore.get(jid);
+  arr.push(msg);
+  if (arr.length > MESSAGE_STORE_LIMIT) arr.shift();
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function detectMediaKind(m) {
   if (!m) return null;
@@ -223,6 +234,13 @@ async function connect() {
           timestamp: Math.floor(ts),
         };
 
+        const storedEntry = {
+          ...base,
+          text: text || "",
+          media_kind: mediaKind || null,
+        };
+        storeMessage(remoteJid, storedEntry);
+
         if (text) {
           await forwardToPython({ ...base, text });
         } else if (mediaKind) {
@@ -292,6 +310,15 @@ app.post("/react", async (req, res) => {
     console.error("[wa_sidecar] /react error:", e);
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
+});
+
+// GET /messages?jid=<group_jid>&limit=50
+app.get("/messages", (req, res) => {
+  const { jid, limit } = req.query;
+  if (!jid) return res.status(400).json({ ok: false, error: "jid required" });
+  const msgs = messageStore.get(jid) || [];
+  const n = Math.min(Number(limit) || 50, MESSAGE_STORE_LIMIT);
+  return res.json({ ok: true, jid, count: msgs.length, messages: msgs.slice(-n) });
 });
 
 app.listen(PORT, () => {

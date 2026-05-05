@@ -6,30 +6,40 @@ from rapidfuzz import fuzz
 
 # WhatsApp group JID -> member registry (Notion assignee canonical name -> WA metadata)
 MEMBER_MAP: dict[str, dict[str, Any]] = {
-    "120363405525137244@g.us": {
+    # Team 1 — Notion DB: 3561be702f5680eca62af485b2731007
+    "120363426424851434@g.us": {
         "notion_assignees": {
             "Ameya Dusane": {
                 "wa_display_names": ["Ameya", "Ameya D", "AD", "Ameya Dusane"],
                 "wa_jid": "91XXXXXXXXXX@s.whatsapp.net",
             },
-        },
-    },
-    "120363405525137244@g.us": {
-        "notion_assignees": {
             "Aniruddha Sonar": {
                 "wa_display_names": ["Aniruddha", "Aniruddha S", "AS", "Aniruddha Sonar"],
                 "wa_jid": "91XXXXXXXXXX@s.whatsapp.net",
             },
-        },
-    },
-    "120363405525137244@g.us": {
-        "notion_assignees": {
             "Shreya Vispute": {
                 "wa_display_names": ["Shreya", "Shreya V", "SV", "Shreya Vispute"],
                 "wa_jid": "91XXXXXXXXXX@s.whatsapp.net",
             },
         },
-    }
+    },
+    # Team 2 — Notion DB: 0761be702f5682bb913a81e7551e7db1 — replace PENDING with real JID
+    "120363408322000439@g.us": {
+        "notion_assignees": {
+            "Ameya Dusane": {
+                "wa_display_names": ["Ameya", "Ameya D", "AD", "Ameya Dusane"],
+                "wa_jid": "91XXXXXXXXXX@s.whatsapp.net",
+            },
+            "Bhushan Anokar": {
+                "wa_display_names": ["Bhushan", "Bhushan A", "BA", "Bhushan Anokar"],
+                "wa_jid": "91XXXXXXXXXX@s.whatsapp.net",
+            },
+            "Nishant Raj Tiwari": {
+                "wa_display_names": ["Nishant", "Nishant T", "NRT", "Nishant Raj Tiwari"],
+                "wa_jid": "91XXXXXXXXXX@s.whatsapp.net",
+            },
+        },
+    },
 }
 
 

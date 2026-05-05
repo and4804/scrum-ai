@@ -919,7 +919,7 @@ class NotionTools:
         tasks_info = await self.debug_list_tasks(db_id, page_size=100)
         unique_assignees = tasks_info.get("unique_assignees", [])
 
-        today = datetime.now(ZoneInfo(self._timezone)).date()
+        today = today_in_tz(self._timezone)
 
         assignee_options = self._extract_property_options(props, "Assigned To")
         unassigned = None
